@@ -1,0 +1,6 @@
+model = MoCo().cuda()
+
+
+# Save the trained MoCo model
+torch.save(model.state_dict(), 'moco_final.pt')
+print("Pretrained MoCo model saved as 'moco_final.pt'")

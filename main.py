@@ -5,13 +5,15 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 import copy
 import matplotlib.pyplot as plt
+import torchvision.models as models
 
-# Hyperparameters
-K = 4096
-m = 0.99
-T = 0.07
-EPOCHS = 50
-BATCH_SIZE = 256
+#hyperparameters
+K = 8192  
+m = 0.999  
+T = 0.1  
+EPOCHS = 135
+BATCH_SIZE = 512
+LR = 0.03  
 
 transform_train = transforms.Compose([
     transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
@@ -19,31 +21,27 @@ transform_train = transforms.Compose([
     transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
     transforms.RandomGrayscale(p=0.2),
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
+#TwoCropsTransform class for MoCo
+class TwoCropsTransform:
+    def __init__(self, base_transform):
+        self.base_transform = base_transform
+
+    def __call__(self, x):
+        q = self.base_transform(x)
+        k = self.base_transform(x)
+        return [q, k]
+
+#encoder model based on ResNet-18
 class Encoder(nn.Module):
     def __init__(self, dim=128):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-
+        resnet = models.resnet18(pretrained=False)
+        self.encoder = nn.Sequential(*list(resnet.children())[:-1])  
         self.projection = nn.Sequential(
-            nn.Linear(256, 256),
+            nn.Linear(resnet.fc.in_features, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Linear(256, dim)
@@ -55,6 +53,7 @@ class Encoder(nn.Module):
         x = self.projection(x)
         return nn.functional.normalize(x, dim=1)
 
+#MoCo model
 class MoCo(nn.Module):
     def __init__(self, dim=128):
         super().__init__()
@@ -95,9 +94,6 @@ class MoCo(nn.Module):
         l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
 
-        # Debug prints
-        # print(f"Pos sim: {l_pos.mean():.3f}, Neg sim: {l_neg.mean():.3f}")
-
         logits = torch.cat([l_pos, l_neg], dim=1)
         logits /= self.T
 
@@ -107,29 +103,22 @@ class MoCo(nn.Module):
 
         return logits, labels
 
+#training function
 def train_moco():
     model = MoCo().cuda()
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.encoder_q.parameters(),
-                               lr=0.03,
-                               momentum=0.9,
-                               weight_decay=1e-4)
+    optimizer = torch.optim.SGD(model.encoder_q.parameters(), lr=LR, momentum=0.9, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    # Simple step scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                              step_size=20,
-                                              gamma=0.1)
-
-    dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True,
-                                         transform=TwoCropsTransform(transform_train))
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
-                          num_workers=2, drop_last=True, pin_memory=True)
+    dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=TwoCropsTransform(transform_train))
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, drop_last=True, pin_memory=True)
 
     train_losses = []
 
     for epoch in range(EPOCHS):
         epoch_loss = 0.0
         batch_count = 0
+
         for i, (images, _) in enumerate(dataloader):
             im_q, im_k = images[0].cuda(), images[1].cuda()
 
@@ -143,44 +132,24 @@ def train_moco():
             epoch_loss += loss.item()
             batch_count += 1
 
-            if i % 50 == 0:
-                print(f'Epoch: {epoch}, Batch: {i}, Loss: {loss.item():.4f}, LR: {scheduler.get_last_lr()[0]:.6f}')
-
         scheduler.step()
         avg_loss = epoch_loss / batch_count
         train_losses.append(avg_loss)
-        print(f'Epoch {epoch} completed, Average Loss: {avg_loss:.4f}')
+        print(f'Epoch {epoch}/{EPOCHS}, Loss: {avg_loss:.4f}')
 
-        # Save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-            }, f'moco_checkpoint_epoch_{epoch+1}.pt')
+            torch.save(model.state_dict(), f'moco_epoch_{epoch+1}.pt')
 
-    # Plot loss curve
     plt.figure(figsize=(10, 5))
-    plt.plot(train_losses)
-    plt.title('Training Loss')
+    plt.plot(train_losses, label='Training Loss')
+    plt.title('MoCo Training Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.savefig('loss_curve.png')
+    plt.legend()
     plt.show()
 
-    # Save final model
     torch.save(model.state_dict(), 'moco_final.pt')
-    return train_losses
 
-class TwoCropsTransform:
-    def __init__(self, base_transform):
-        self.base_transform = base_transform
-
-    def __call__(self, x):
-        q = self.base_transform(x)
-        k = self.base_transform(x)
-        return [q, k]
-
+#train the model
 if __name__ == "__main__":
-    losses = train_moco()
+    train_moco()

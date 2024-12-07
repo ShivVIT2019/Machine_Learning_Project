@@ -7,14 +7,15 @@ import copy
 import matplotlib.pyplot as plt
 import torchvision.models as models
 
-#hyperparameters
-K = 8192  
-m = 0.999  
-T = 0.1  
+# Hyperparameters
+K = 8192  # Queue size
+m = 0.999  # Momentum for key encoder update
+T = 0.1  # Temperature for contrastive loss
 EPOCHS = 135
 BATCH_SIZE = 512
-LR = 0.03  
+LR = 0.03  # Learning rate for SGD
 
+# Enhanced data augmentation
 transform_train = transforms.Compose([
     transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
     transforms.RandomHorizontalFlip(),
@@ -24,7 +25,7 @@ transform_train = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-#TwoCropsTransform class for MoCo
+# TwoCropsTransform class for MoCo
 class TwoCropsTransform:
     def __init__(self, base_transform):
         self.base_transform = base_transform
@@ -34,12 +35,12 @@ class TwoCropsTransform:
         k = self.base_transform(x)
         return [q, k]
 
-#encoder model based on ResNet-18
+# Encoder model based on ResNet-18
 class Encoder(nn.Module):
     def __init__(self, dim=128):
         super().__init__()
         resnet = models.resnet18(pretrained=False)
-        self.encoder = nn.Sequential(*list(resnet.children())[:-1])  
+        self.encoder = nn.Sequential(*list(resnet.children())[:-1])  # Remove final FC layer
         self.projection = nn.Sequential(
             nn.Linear(resnet.fc.in_features, 256),
             nn.BatchNorm1d(256),
@@ -53,7 +54,7 @@ class Encoder(nn.Module):
         x = self.projection(x)
         return nn.functional.normalize(x, dim=1)
 
-#MoCo model
+# MoCo model
 class MoCo(nn.Module):
     def __init__(self, dim=128):
         super().__init__()
@@ -103,7 +104,7 @@ class MoCo(nn.Module):
 
         return logits, labels
 
-#training function
+# Training function
 def train_moco():
     model = MoCo().cuda()
     criterion = nn.CrossEntropyLoss()
@@ -150,6 +151,6 @@ def train_moco():
 
     torch.save(model.state_dict(), 'moco_final.pt')
 
-#train the model
+# Train the model
 if __name__ == "__main__":
     train_moco()
